@@ -34,5 +34,5 @@
     // Mostrar errores y advertencias del compilador real (no IntelliSense)
     // en el panel de Problemas cuando se ejecuta idf.py build desde la extensión
     "idf.enableUpdateSrcsToCMakeLists": false,
-    "idf.currentSetup": "C:\\esp\\v6.0.1\\esp-idf"
+    "idf.currentSetup": "C:\\esp\\.espressif\\v6.0.1\\esp-idf"
 }
