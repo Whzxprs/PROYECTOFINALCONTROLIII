@@ -44,6 +44,7 @@ import threading
 import collections
 import datetime
 import os
+import math
 
 import numpy as np
 import pyqtgraph as pg
@@ -75,7 +76,8 @@ KT_AL  = 91.07
 KT_OM  = 8.67
 KT_U   = 12.08
 
-BUF_LEN    = 600   # muestras visibles en graficas (~6 s a 100 Hz)
+TELEM_DT   = 0.20  # firmware: 5 Hz, control sigue a 100 Hz
+BUF_LEN    = 600   # muestras visibles en graficas (~120 s a 5 Hz)
 REFRESH_MS = 50    # refresco visual (20 fps)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -442,7 +444,7 @@ class PlotPanel(QWidget):
 # ─────────────────────────────────────────────────────────────────────────────
 #  PANEL DE GANANCIAS Y REFERENCIAS
 #  Envía: 0xBB + id(1B) + float32_LE(4B)  →  ESP32:5006
-#  IDs: 0=kpi 1=kdi 2=kpv 3=kiv 4=kpo 5=kdo 6=vd 7=ramp 8=alphad
+#  IDs: 0=kpi 1=kdi 2=kpv 3=kiv 4=kpo 5=kdo 6=vd 7=ramp 8=alphad 9=c1 10=calpha
 # ─────────────────────────────────────────────────────────────────────────────
 _GAIN_DEFS = [
     (0, "kpi",    "P balance"),
@@ -454,6 +456,8 @@ _GAIN_DEFS = [
     (6, "vd",     "Vel. ref (m/s)"),
     (7, "ramp",   "Rampa"),
     (8, "α_ref",  "Alpha ref (rad)"),
+    (9, "c1",     "Filtro complementario"),
+    (10, "calpha", "Offset angulo (rad)"),
 ]
 
 class GainsBar(QWidget):
@@ -484,7 +488,13 @@ class GainsBar(QWidget):
             lbl.setStyleSheet(f"color:{C['dim']}; font-size:9px;")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            edit = QLineEdit("0.0000")
+            if gid == 9:
+                default_text = "0.9950"
+            elif gid == 10:
+                default_text = "0.1450"
+            else:
+                default_text = "0.0000"
+            edit = QLineEdit(default_text)
             edit.setFixedWidth(72)
             edit.setAlignment(Qt.AlignmentFlag.AlignRight)
             edit.setToolTip(tip)
@@ -730,7 +740,7 @@ class MainWindow(QMainWindow):
         with self._rec_lock:
             if self._rec_file:
                 try:
-                    self._rec_t += 0.01   # Ts = 10 ms
+                    self._rec_t += TELEM_DT
                     row = (
                         f"{self._rec_t:.3f}\t"
                         f"{data['vd']:+.6f}\t{data['v']:+.6f}\t"
@@ -799,10 +809,13 @@ class MainWindow(QMainWindow):
         if self._esp32_ip == "—":
             self._on_status("Sin IP del ESP32 — recibe al menos un paquete primero", True)
             return
+        if not math.isfinite(value):
+            self._on_status("Valor invalido: usa un numero finito", True)
+            return
         try:
             pkt = struct.pack('<BBf', 0xBB, gain_id, value)
             self._cmd_sock.sendto(pkt, (self._esp32_ip, CMD_UDP_PORT))
-            names = ["kpi","kdi","kpv","kiv","kpo","kdo","vd","ramp","α_ref"]
+            names = ["kpi","kdi","kpv","kiv","kpo","kdo","vd","ramp","α_ref","c1","calpha"]
             name  = names[gain_id] if gain_id < len(names) else str(gain_id)
             self._on_status(f"Enviado {name} = {value:.4f}  →  {self._esp32_ip}:{CMD_UDP_PORT}", False)
         except Exception as exc:

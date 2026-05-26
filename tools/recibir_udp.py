@@ -2,7 +2,7 @@
 recibir_udp.py - Receptor de telemetria del PISDRSL por UDP
 ===========================================================
 
-La ESP32 envia un paquete UDP binario cada 10 ms.
+La ESP32 envia telemetria UDP a 5 Hz; el control sigue corriendo a 100 Hz.
 
 Formato v2:
   0xAB + version + seq + 8 float32 + 2 ADC12 + flags
@@ -116,7 +116,7 @@ print(" " + "-" * 100)
 HEADER_CSV = "tiempo_s,proto,seq,vd,v,theta,alpha,omegal,omegar,ul,ur,sl_adc,sr_adc,modo_sol\n"
 
 t = 0.0
-TS_TELEM = 0.01
+TS_TELEM = 0.20
 muestras = 0
 errores = 0
 RAD2DEG = 57.2958
@@ -176,7 +176,7 @@ print(f"\n\n{'-' * 50}")
 print(f"  Muestras recibidas : {muestras}")
 print(f"  Paquetes ignorados : {errores}")
 print(f"  Duracion           : {duracion:.1f} s")
-print(f"  Frecuencia real    : {freq:.2f} Hz (esperado: 100 Hz)")
+print(f"  Frecuencia real    : {freq:.2f} Hz (esperado: 5 Hz)")
 print(f"  Archivo guardado   : {output_file}")
 print(f"{'-' * 50}\n")
 

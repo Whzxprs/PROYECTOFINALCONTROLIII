@@ -13,17 +13,18 @@
  *   Core 0 — cmd_task      (recibe ganancias por UDP en tiempo real, puerto 5006)
  *   Timer  — esp_timer ISR (10 000 µs → vTaskNotifyGiveFromISR → control_task)
  *
- * TELEMETRÍA (cada ciclo de 10 ms):
+ * TELEMETRÍA (baja prioridad, 5 Hz):
  *   Paquete binario v2: 0xAB + float32 + ADC12 → UDP broadcast 255.255.255.255:5005
  *   Abrir monitor: python monitor/monitor.py
  *
  * AJUSTE EN VIVO (sin recompilar):
  *   Enviar UDP a ESP32:5006 → 0xBB + id(1B) + float32_LE(4B)
- *   id: 0=kpi 1=kdi 2=kpv 3=kiv 4=kpo 5=kdo 6=vd 7=ramp 8=alphad
+ *   id: 0=kpi 1=kdi 2=kpv 3=kiv 4=kpo 5=kdo 6=vd 7=ramp 8=alphad 9=c1 10=calpha
  */
 
 #include <math.h>
 #include <string.h>
+#include <fcntl.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -91,11 +92,12 @@ static const char *TAG = "PISDRSL";
 #define B_H         0.09f         /* Semidistancia entre ruedas [m] */
 
 /* IMU y ángulo */
-#define CALPHA      0.145f           /* Compensación de alineación del MPU [rad] */
-#define C1          0.70f          /* Constante filtro complementario ajustable */
-#define C2          (1.0f - C1)
+#define CALPHA_DEFAULT 0.145f        /* Compensación de alineación del MPU [rad] */
+#define C1_DEFAULT  0.995f          /* Constante filtro complementario ajustable */
 #define ACCEL_F     0.0000610352f   /* Escala acelerómetro (LSB→rango ±1) */
 #define GYRO_F      0.0076336f       /* Escala giroscopio (LSB→°/s) — ±250°/s: 1/131 */
+#define EIP_FILT_C1 0.70f            /* Filtro de derivada de inclinación */
+#define EIP_FILT_C2 (1.0f - EIP_FILT_C1)
 
 /* Sensores de línea: usar ADC12 nativo, no escala heredada de 8 bits */
 #define ADC12_MAX        4095.0f
@@ -105,7 +107,6 @@ static const char *TAG = "PISDRSL";
 /* Límites */
 #define TAU_MAX     0.1654f            /* Par máximo en rueda [Nm] */
 #define ALPHA_MAX   1.4f            /* Ángulo máximo antes de declarar caída [rad] */
-#define OMEGA_MAX   44.0f           /* Velocidad angular máxima de rueda [rad/s] */
 #define U_M         11.0f          /* Voltaje máximo para escala PWM [V] */
 #define U_NM        11.0f           /* Voltaje máximo a los motores [V] */
 
@@ -134,6 +135,8 @@ volatile float g_kdo   = 0.0f;    /* Ganancia derivativa orientación */
 volatile float g_vd    = 0.0f;    /* Velocidad deseada [m/s] — empezar en 0 para calibrar */
 volatile float g_ramp  = 0.0f;    /* Rampa de velocidad [m/s por ciclo de 10ms] */
 volatile float g_alphad = 0.0f;   /* Referencia de inclinación [rad] — ajustar para calibrar balance */
+volatile float g_c1     = C1_DEFAULT; /* Filtro complementario: gyro vs acelerómetro */
+volatile float g_calpha = CALPHA_DEFAULT; /* Offset de inclinación del MPU [rad] */
 
 /* ============================================================================
    SECCIÓN 4 — TELEMETRÍA
@@ -143,6 +146,7 @@ volatile float g_alphad = 0.0f;   /* Referencia de inclinación [rad] — ajusta
 #define TELEM_HEADER    0xABu
 #define TELEM_VERSION   2u
 #define TELEM_FLAG_SOL  0x01u
+#define TELEM_EVERY_CYCLES 20u  /* Control 100 Hz / 20 = telemetría 5 Hz */
 
 typedef struct __attribute__((packed)) {
     uint8_t  header;
@@ -273,9 +277,9 @@ static void mpu_write(uint8_t reg, uint8_t val)
     i2c_master_transmit(mpu_dev, buf, 2, 100);
 }
 
-static void mpu_read_regs(uint8_t reg, uint8_t *out, size_t n)
+static esp_err_t mpu_read_regs(uint8_t reg, uint8_t *out, size_t n)
 {
-    i2c_master_transmit_receive(mpu_dev, &reg, 1, out, n, 100);
+    return i2c_master_transmit_receive(mpu_dev, &reg, 1, out, n, 100);
 }
 
 /* ============================================================================
@@ -466,6 +470,10 @@ static void udp_init(void)
     /* Habilitar broadcast (necesario para 255.255.255.255) */
     int bcast = 1;
     setsockopt(s, SOL_SOCKET, SO_BROADCAST, &bcast, sizeof(bcast));
+    int flags = fcntl(s, F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(s, F_SETFL, flags | O_NONBLOCK);
+    }
 
     memset(&udp_dest, 0, sizeof(udp_dest));
     udp_dest.sin_family      = AF_INET;
@@ -500,6 +508,10 @@ static void cmd_task(void *arg)
 
         float val;
         memcpy(&val, &buf[2], 4);
+        if (!isfinite(val)) {
+            ESP_LOGW(TAG, "Comando[%d] ignorado: valor no finito", buf[1]);
+            continue;
+        }
 
         switch (buf[1]) {
             case 0: g_kpi  = val; break;
@@ -511,6 +523,19 @@ static void cmd_task(void *arg)
             case 6: g_vd    = val; break;
             case 7: g_ramp  = val; break;
             case 8: g_alphad = val; break;
+            case 9:
+                if (val < 0.0f) val = 0.0f;
+                if (val > 0.999f) val = 0.999f;
+                g_c1 = val;
+                break;
+            case 10:
+                if (val < -0.8f) val = -0.8f;
+                if (val >  0.8f) val =  0.8f;
+                g_calpha = val;
+                break;
+            default:
+                ESP_LOGW(TAG, "Comando desconocido: id=%d", buf[1]);
+                continue;
         }
         ESP_LOGI(TAG, "Ganancia[%d] = %.4f", buf[1], val);
     }
@@ -567,11 +592,11 @@ static void telemetry_send(uint16_t seq,
      5. Filtro complementario → alpha
      6. Detección de caída → motores off
      7. Cinemática: v, thetap, eop
-     8. Errores: ei, eip, ev + integrador con anti-windup
+     8. Errores: ei, eip filtrado, ev + integrador con anti-windup
      9. Leyes de control: taua, u
     10. Torques por rueda: taur, taul
     11. Voltajes con back-EMF: ur, ul
-    12. Actuación + telemetría UDP
+    12. Actuación + telemetría UDP decimada
    ============================================================================ */
 static void control_task(void *arg)
 {
@@ -580,11 +605,14 @@ static void control_task(void *arg)
 
     /* Estado de los controladores */
     float ei_1  = 0.0f;
+    float eip_f = 0.0f;
     float intev = 0.0f;
     float vd_r  = 0.0f;   /* Velocidad deseada con rampa */
+    float theta_f = 0.0f;
 
     uint8_t imu_raw[MPU_FRAME_LEN];
     uint32_t log_cnt = 0;
+    uint32_t telem_div = TELEM_EVERY_CYCLES - 1u;
     uint16_t telem_seq = 0;
 
     /* Esperar convergencia del filtro antes de activar control */
@@ -599,13 +627,22 @@ static void control_task(void *arg)
 
         /* ── PASO 1: Sensores de línea ───────────────────────────────────── */
         int raw_izq = 0, raw_der = 0;
-        adc_oneshot_read(adc1_handle, ADC_CH_IZQ, &raw_izq);
-        adc_oneshot_read(adc1_handle, ADC_CH_DER, &raw_der);
+        esp_err_t adc_izq_err = adc_oneshot_read(adc1_handle, ADC_CH_IZQ, &raw_izq);
+        esp_err_t adc_der_err = adc_oneshot_read(adc1_handle, ADC_CH_DER, &raw_der);
+        bool adc_ok = (adc_izq_err == ESP_OK) && (adc_der_err == ESP_OK);
         float Sl = (float)raw_izq;   /* ADC12 crudo: 0–4095 */
         float Sr = (float)raw_der;
 
         /* ── PASO 2: IMU — lectura burst ACCEL+GYRO para menor jitter ───── */
-        mpu_read_regs(REG_ACCEL_XH, imu_raw, MPU_FRAME_LEN);
+        if (mpu_read_regs(REG_ACCEL_XH, imu_raw, MPU_FRAME_LEN) != ESP_OK) {
+            motors_off();
+            ei_1 = 0.0f;
+            eip_f = 0.0f;
+            intev = 0.0f;
+            vd_r = 0.0f;
+            gpio_set_level(PIN_DEBUG, 0);
+            continue;
+        }
         int16_t Ax = (int16_t)((imu_raw[0] << 8) | imu_raw[1]);
         int16_t Gy = (int16_t)((imu_raw[MPU_GYRO_Y_IDX] << 8) |
                                imu_raw[MPU_GYRO_Y_IDX + 1]);
@@ -617,10 +654,14 @@ static void control_task(void *arg)
         portEXIT_CRITICAL(&enc_mux);
 
         /* ── PASO 4: Error de seguimiento de línea en escala ADC12 ─────── */
-        float theta = Sr - Sl;
-        if (theta >  LINE_ERR_MAX_ADC) theta =  LINE_ERR_MAX_ADC;
-        if (theta < -LINE_ERR_MAX_ADC) theta = -LINE_ERR_MAX_ADC;
-        theta = -LINE_THETA_MAX * theta / LINE_ERR_MAX_ADC;
+        if (adc_ok) {
+            float theta_raw = Sr - Sl;
+            if (theta_raw >  LINE_ERR_MAX_ADC) theta_raw =  LINE_ERR_MAX_ADC;
+            if (theta_raw < -LINE_ERR_MAX_ADC) theta_raw = -LINE_ERR_MAX_ADC;
+            theta_raw = -LINE_THETA_MAX * theta_raw / LINE_ERR_MAX_ADC;
+            theta_f = 0.75f * theta_f + 0.25f * theta_raw;
+        }
+        float theta = theta_f;
 
         /* ── PASO 5: Velocidades angulares de rueda ──────────────────────
          * Cruce físico verificado: enc_l (LA/LB) → rueda derecha
@@ -628,38 +669,45 @@ static void control_task(void *arg)
          * esc = pi/(2·ppr·NR)  — igual que PIC                           */
         float omegar = (float) cnt_l * ESC_ENC * ITS;
         float omegal = -(float)cnt_r * ESC_ENC * ITS;
-        if (omegar >  OMEGA_MAX) omegar =  OMEGA_MAX;
-        if (omegar < -OMEGA_MAX) omegar = -OMEGA_MAX;
-        if (omegal >  OMEGA_MAX) omegal =  OMEGA_MAX;
-        if (omegal < -OMEGA_MAX) omegal = -OMEGA_MAX;
 
         /* ── PASO 6: Filtro complementario → alpha ───────────────────────
-         * Igual al PIC:
-         *   Xa     = -Ax * accel_factor          (rango -1 a 1)
+         * Convención usada por main_pic_clean:
+         *   Xa     = Ax * accel_factor           (rango -1 a 1)
          *   Yg     = Gy * gyro_factor * deg2rad  (rad/s)
          *   accelx = Xa * pi/2                   (rango -pi/2 a pi/2)
          *   angulox= c1*(angulox_1 + Yg*Ts) + c2*accelx
-         *   alpha  = -angulox - calpha            */
-        float Xa      = -(float)Ax * ACCEL_F;
+         *   alpha  = angulox - calpha             */
+        float Xa      = (float)Ax * ACCEL_F;
         float Yg_rads = (float)Gy  * GYRO_F * DEG2RAD;
         float accelx  = Xa * PI_S2;
-        float angulox = C1 * (angulox_1 + Yg_rads * TS) + C2 * accelx;
+        float c1 = g_c1;
+        if (c1 < 0.0f) c1 = 0.0f;
+        if (c1 > 0.999f) c1 = 0.999f;
+        float c2 = 1.0f - c1;
+        float angulox = c1 * (angulox_1 + Yg_rads * TS) + c2 * accelx;
         angulox_1 = angulox;
-        float alpha = -angulox - CALPHA;
+        float calpha = g_calpha;
+        if (calpha < -0.8f) calpha = -0.8f;
+        if (calpha >  0.8f) calpha =  0.8f;
+        float alpha = angulox - calpha;
         if (alpha >  ALPHA_MAX) alpha =  ALPHA_MAX;
         if (alpha < -ALPHA_MAX) alpha = -ALPHA_MAX;
 
         /* ── PASO 7: Detección de caída ──────────────────────────────────
          * Si alpha >= alphaM el robot está en el suelo — apagar motores
-         * y resetear integradores (igual que PIC)                        */
+         * y resetear estados de control.                                  */
         if (fabsf(alpha) >= ALPHA_MAX) {
             motors_off();
             ei_1  = 0.0f;
+            eip_f = 0.0f;
             intev = 0.0f;
             vd_r  = 0.0f;
-            telemetry_send(telem_seq++, 0.0f, 0.0f, theta, alpha,
-                           0.0f, 0.0f, 0.0f, 0.0f,
-                           raw_izq, raw_der, 0x00u);
+            if (++telem_div >= TELEM_EVERY_CYCLES) {
+                telem_div = 0;
+                telemetry_send(telem_seq++, 0.0f, 0.0f, theta, alpha,
+                               0.0f, 0.0f, 0.0f, 0.0f,
+                               raw_izq, raw_der, 0x00u);
+            }
             gpio_set_level(PIN_DEBUG, 0);
             continue;
         }
@@ -673,11 +721,14 @@ static void control_task(void *arg)
         float eop    = -thetap;
         float eo     = THETAD - theta;
 
-        /* ── PASO 9: Errores y controladores (PIC) ───────────────────────
+        /* ── PASO 9: Errores y controladores ─────────────────────────────
+         * eip igual que main_pic_clean: diferencia de ei filtrada.
          * Rampa de velocidad para arranque suave (g_ramp=0 → escalón)    */
         float ei  = g_alphad - alpha;
-        float eip = (ei - ei_1) * ITS;
+        float eip_raw = (ei - ei_1) * ITS;
         ei_1 = ei;
+        eip_f = EIP_FILT_C1 * eip_f + EIP_FILT_C2 * eip_raw;
+        float eip = eip_f;
 
         if (g_ramp > 0.0f) {
             float vd_t = g_vd;
@@ -724,10 +775,13 @@ static void control_task(void *arg)
         motor_set(PIN_MOT_L_IN1, PIN_MOT_L_IN2, LEDC_CH_L, -ul);
         motor_set(PIN_MOT_R_IN1, PIN_MOT_R_IN2, LEDC_CH_R,  ur);
 
-        /* ── PASO 14: Telemetría UDP v2, float32 + ADC crudo 12-bit ───── */
-        telemetry_send(telem_seq++, vd_r, v, theta, alpha,
-                       omegal, omegar, ul, ur,
-                       raw_izq, raw_der, 0x00u);
+        /* ── PASO 14: Telemetría UDP v2 decimada, no bloqueante ───────── */
+        if (++telem_div >= TELEM_EVERY_CYCLES) {
+            telem_div = 0;
+            telemetry_send(telem_seq++, vd_r, v, theta, alpha,
+                           omegal, omegar, ul, ur,
+                           raw_izq, raw_der, 0x00u);
+        }
 
         /* ── Log serial cada 500 ms (50 ciclos) ──────────────────────── */
         if (++log_cnt >= 50) {
@@ -746,7 +800,7 @@ static void control_task(void *arg)
 void app_main(void)
 {
     ESP_LOGI(TAG, "=== PISDRSL — ESP32 + FreeRTOS ===");
-    ESP_LOGI(TAG, "NR=%.0f  calpha=%.3f  tauM=%.2f", NR, CALPHA, TAU_MAX);
+    ESP_LOGI(TAG, "NR=%.0f  calpha=%.3f  tauM=%.2f", NR, g_calpha, TAU_MAX);
     ESP_LOGI(TAG, "kpi=%.2f  kdi=%.2f  kpv=%.2f  kiv=%.2f",
              g_kpi, g_kdi, g_kpv, g_kiv);
 
@@ -772,7 +826,7 @@ void app_main(void)
     udp_init();
 
     /* Recepción de ganancias: Core 0, prioridad baja */
-    xTaskCreate(cmd_task, "cmd", 3072, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(cmd_task, "cmd", 3072, NULL, 5, NULL, 0);
 
     ESP_LOGI(TAG, "Sistema listo. Monitor: python monitor/monitor.py");
 }

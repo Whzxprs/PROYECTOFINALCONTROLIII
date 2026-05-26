@@ -63,36 +63,28 @@
 #define R_RUEDA     0.035f
 #define DIST_EJES   0.09f
 
-// Constantes matemáticas
-#define PI          3.141593f
-#define PI_S2       1.570796f
-#define RAD2DEG     57.29578f
-#define DEG2RAD     0.0174533f
-
-// Parámetros motor y transmisión
 #define RA          3.0f
 #define KM          0.0008f
 #define NR          34.014f
 #define TAU_MAX     0.1654f
-#define ALPHA_MAX   1.4f
 #define OMEGA_MAX   14.7f
 #define U_MAX       11.0f
 
-// Encoder y PWM
 #define PPR         12.0f
-#define ESC_ENC     (2.0f * PI / (4.0f * PPR * NR))    // 2π/(4·ppr·NR) = 0.003848
+#define ESC_ENC     0.003848f
 #define ESC_PWM     23.18f
 
-// Modelo motor DC: u = RASNKM·τ + NKM·ω
-#define RASNKM      (RA / (KM * NR))                    // Ra/(km·NR) = 110.29
-#define NKM         (KM * NR)                           // km·NR = 0.02721
+#define RASNKM      110.29f
+#define NKM         0.0272f
 #define V2TAUM      0.3308f
 
 #define CALPHA      0.145f
 #define ACCEL_F     0.0000610352f
 #define GYRO_F      0.0076336f
+#define DEG2RAD     0.0174533f
 
 #define C1          0.995f
+#define C_DERF      0.7f
 
 /* ═══════════════════════════════════════════════════════════════
  *  CONFIG - GANANCIAS
@@ -103,14 +95,14 @@
 
 /* Ganancias ajustables en tiempo real via UDP (puerto CMD_UDP_PORT).
  * El monitor las envia como: 0xBB + id(1B) + float32_LE(4B) */
-volatile float g_kpi  = 0.0f;
-volatile float g_kdi  = 0.0f;
-volatile float g_kpv  = 0.0f;
-volatile float g_kiv  = 0.0f;
-volatile float g_kpo  = 0.0f;
-volatile float g_kdo  = 0.0f;
-volatile float g_vd   = 0.0f;
-volatile float g_ramp = 0.0f;  /* m/s por ciclo de 10ms → ~0.5 m/s² */
+volatile float g_kpi  = 2.20f;
+volatile float g_kdi  = 0.16f;
+volatile float g_kpv  = 1.0f;
+volatile float g_kiv  = 2.0f;
+volatile float g_kpo  = 0.09f;
+volatile float g_kdo  = 0.01f;
+volatile float g_vd   = 0.1f;
+volatile float g_ramp = 0.005f;  /* m/s por ciclo de 10ms → ~0.5 m/s² */
 
 #define TS          0.01f
 #define ITS         100.0f
@@ -130,9 +122,9 @@ volatile float g_ramp = 0.0f;  /* m/s por ciclo de 10ms → ~0.5 m/s² */
 #define KT_OM       8.67f
 #define KT_U        12.08f
 
-#define WIFI_SSID        "WHZ_QW"
+#define WIFI_SSID        "WifiAlex"
 #define WIFI_PASS        "Acetilena1702@@//"
-#define UDP_DEST_IP      "192.168.1.68"
+#define UDP_DEST_IP      "192.168.43.71"
 #define UDP_PORT         5006
 #define WIFI_TIMEOUT_MS  15000
 
@@ -245,9 +237,10 @@ static void motor_set(gpio_num_t in1, gpio_num_t in2,
 static float line_follow_theta(float sl, float sr)
 {
     float line_err = sr - sl;
-    if (line_err >  160.0f) line_err =  160.0f;
-    if (line_err < -160.0f) line_err = -160.0f;
-    return -0.3f * line_err / 160.0f;
+    if (line_err > 220.0f) line_err = 220.0f;
+    if (line_err < -220.0f) line_err = -220.0f;
+
+    return -0.18f * line_err / 220.0f;
 }
 
 static void wifi_event_cb(void *arg, esp_event_base_t base,
@@ -401,9 +394,13 @@ static void hw_init(void)
 
 static void control_task(void *arg)
 {
+    float angulox_1 = 0.0f;
+    float c2 = 1.0f - C1;
     float ei_l = 0.0f;
+    float eip_f = 0.0f;
     float intev = 0.0f;
     float vd_r = 0.0f;
+    float theta_f = 0.0f;
     uint8_t raw[2];
     uint32_t log_cnt = 0;
 
@@ -422,6 +419,9 @@ static void control_task(void *arg)
         mpu_read(REG_ACCEL_XH, raw, 2);
         int16_t Ax = (int16_t)((raw[0] << 8) | raw[1]);
 
+        mpu_read(REG_GYRO_YH, raw, 2);
+        int16_t Gy = (int16_t)((raw[0] << 8) | raw[1]);
+
         portENTER_CRITICAL(&enc_mux);
         int32_t cnt_r = enc_r;
         enc_r = 0;
@@ -429,28 +429,21 @@ static void control_task(void *arg)
         enc_l = 0;
         portEXIT_CRITICAL(&enc_mux);
 
-        float theta = line_follow_theta(Sl, Sr);
+        /* filtro pasa-bajas en theta: suaviza los saltos bruscos al cruzar el borde
+         * de la línea para no sacudir el lazo de balance (τ ≈ 35 ms a 100 Hz) */
+        theta_f = 0.75f * theta_f + 0.25f * line_follow_theta(Sl, Sr);
+        float theta = theta_f;
 
         /* enc_l físicamente en rueda derecha (+fwd), enc_r en rueda izq (invertido) */
         float omegar = (float)cnt_l * ESC_ENC * ITS;
         float omegal = -(float)cnt_r * ESC_ENC * ITS;
-        if (omegar >  OMEGA_MAX) omegar =  OMEGA_MAX;
-        if (omegar < -OMEGA_MAX) omegar = -OMEGA_MAX;
-        if (omegal >  OMEGA_MAX) omegal =  OMEGA_MAX;
-        if (omegal < -OMEGA_MAX) omegal = -OMEGA_MAX;
 
         float Xa = (float)Ax * ACCEL_F;
-        float alpha = Xa * PI_S2 - CALPHA;
-
-        // Detección de caída: robot en el suelo, resetear integradores y apagar motores
-        if (fabsf(alpha) > ALPHA_MAX) {
-            motor_set(PIN_MOT_L_IN1, PIN_MOT_L_IN2, LEDC_CH_L, 0.0f);
-            motor_set(PIN_MOT_R_IN1, PIN_MOT_R_IN2, LEDC_CH_R, 0.0f);
-            ei_l  = 0.0f;
-            intev = 0.0f;
-            gpio_set_level(PIN_DEBUG, 0);
-            continue;
-        }
+        float Yg = (float)Gy * GYRO_F * DEG2RAD;
+        float accelx = Xa * 1.570796f;
+        float angulox = C1 * (angulox_1 + Yg * TS) + c2 * accelx;
+        angulox_1 = angulox;
+        float alpha = angulox - CALPHA;
 
         float eop = 0.0f;
         float eo = 0.0f;
@@ -474,7 +467,8 @@ static void control_task(void *arg)
         float ev = vd_r - v;
 
         float ei = ALPHAD - alpha;
-        float eip = (ei - ei_l) * ITS;
+        float eip_raw = (ei - ei_l) * ITS;
+        eip_f = C_DERF * eip_f + (1.0f - C_DERF) * eip_raw;
         ei_l = ei;
 
         if (intev < V2TAUM && intev > -V2TAUM) {
@@ -482,7 +476,7 @@ static void control_task(void *arg)
         }
 
         float taua = (g_kdo * eop + g_kpo * eo) * 2.0f * DIST_EJES / R_RUEDA;
-        float u = -g_kpi * ei - g_kdi * eip - g_kpv * ev - g_kiv * intev;
+        float u = -g_kpi * ei - g_kdi * eip_f - g_kpv * ev - g_kiv * intev;
         if (u > V2TAUM) u = V2TAUM;
         if (u < -V2TAUM) u = -V2TAUM;
 
@@ -525,8 +519,8 @@ static void control_task(void *arg)
 
         if (++log_cnt >= 50) {
             log_cnt = 0;
-            ESP_LOGI(TAG, "al=%.1f° v=%.3f wl=%.2f wr=%.2f ul=%.2f ur=%.2f Sl=%.0f Sr=%.0f",
-                     alpha * RAD2DEG, v, omegal, omegar, ul, ur, Sl, Sr);
+            ESP_LOGI(TAG, "al=%.3f v=%.3f wl=%.2f wr=%.2f ul=%.2f ur=%.2f Sl=%.0f Sr=%.0f",
+                     alpha, v, omegal, omegar, ul, ur, Sl, Sr);
         }
 
         gpio_set_level(PIN_DEBUG, 0);

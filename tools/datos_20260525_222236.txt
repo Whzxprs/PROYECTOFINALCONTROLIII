@@ -1,1 +1,0 @@
-tiempo_s,vd,v,theta,alpha,omegal,omegar,ul,ur
