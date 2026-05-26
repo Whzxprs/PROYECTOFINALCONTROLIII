@@ -5,7 +5,15 @@ Balancin Monitor  –  Dashboard modo oscuro / WiFi UDP
 Recibe telemetria de la ESP32 por UDP (inalambrico).
 Muestra valores en tiempo real y permite grabar .txt para MATLAB.
 
-Protocolo UDP (12 bytes por datagrama):
+Protocolo UDP v2 (41 bytes por datagrama):
+  [0]       0xAB  header
+  [1]       version = 2
+  [2:4]     seq uint16 little-endian
+  [4:36]    vd, v, theta, alpha, oml, omr, ul, ur como float32 little-endian
+  [36:40]   Sl, Sr como ADC crudo uint16 little-endian (0-4095)
+  [40]      flags bit0 = modo_sol
+
+Tambien acepta el protocolo legacy (12 bytes):
   [0]  0xAA  header
   [1]  vd    velocidad referencia  (offset 127, escala KT_V)
   [2]  v     velocidad real        (offset 127, escala KT_V)
@@ -53,8 +61,12 @@ from PyQt6.QtGui import QFont, QIntValidator
 # ─────────────────────────────────────────────────────────────────────────────
 UDP_PORT_DEFAULT = 5005    # Puerto UDP de escucha (igual que en main.c)
 CMD_UDP_PORT     = 5006    # Puerto para enviar ganancias al ESP32
-PKT_SIZE         = 12      # Bytes por datagrama: 0xAA + 11 bytes de datos
-HEADER           = 0xAA
+HEADER_LEGACY    = 0xAA
+PKT_SIZE_LEGACY  = 12
+HEADER_V2        = 0xAB
+TELEM_VERSION_V2 = 2
+PKT_FMT_V2       = "<BBHffffffffHHB"
+PKT_SIZE_V2      = struct.calcsize(PKT_FMT_V2)
 
 # Factores de escala — mismos que el firmware ESP32
 KT_V   = 637.5
@@ -149,18 +161,30 @@ class UDPWorker(QThread):
             except Exception:
                 continue
 
-            # Buscar paquetes binarios 0xAA dentro del datagrama
+            # Buscar paquetes binarios v2 (0xAB) o legacy (0xAA) dentro del datagrama
             buf = bytearray(data)
-            while len(buf) >= PKT_SIZE:
-                idx = buf.find(HEADER)
+            while buf:
+                candidates = [i for i in (buf.find(HEADER_V2), buf.find(HEADER_LEGACY)) if i >= 0]
+                if not candidates:
+                    break
+                idx = min(candidates)
                 if idx < 0:
                     break
                 if idx > 0:
                     del buf[:idx]
-                if len(buf) < PKT_SIZE:
+
+                if buf[0] == HEADER_V2:
+                    pkt_size = PKT_SIZE_V2
+                elif buf[0] == HEADER_LEGACY:
+                    pkt_size = PKT_SIZE_LEGACY
+                else:
+                    del buf[0]
+                    continue
+
+                if len(buf) < pkt_size:
                     break
-                parsed = self._decode(bytes(buf[:PKT_SIZE]))
-                del buf[:PKT_SIZE]
+                parsed = self._decode(bytes(buf[:pkt_size]))
+                del buf[:pkt_size]
                 if parsed:
                     self.packet_ready.emit(parsed, ip)
 
@@ -168,7 +192,9 @@ class UDPWorker(QThread):
         self.status_msg.emit("UDP cerrado", False)
 
     def _decode(self, pkt: bytes):
-        if pkt[0] != HEADER:
+        if pkt[0] == HEADER_V2:
+            return self._decode_v2(pkt)
+        if pkt[0] != HEADER_LEGACY:
             return None
         return {
             "vd"      : (pkt[1]  - 127) / KT_V,
@@ -182,6 +208,31 @@ class UDPWorker(QThread):
             "Sl"      : pkt[9],
             "Sr"      : pkt[10],
             "modo_sol": bool(pkt[11] & 0x01),
+            "seq"     : None,
+            "proto"   : "legacy",
+        }
+
+    def _decode_v2(self, pkt: bytes):
+        if len(pkt) < PKT_SIZE_V2:
+            return None
+        header, version, seq, vd, v, theta, alpha, oml, omr, ul, ur, sl, sr, flags = \
+            struct.unpack(PKT_FMT_V2, pkt[:PKT_SIZE_V2])
+        if header != HEADER_V2 or version != TELEM_VERSION_V2:
+            return None
+        return {
+            "vd"      : vd,
+            "v"       : v,
+            "theta"   : theta,
+            "alpha"   : alpha,
+            "oml"     : oml,
+            "omr"     : omr,
+            "ul"      : ul,
+            "ur"      : ur,
+            "Sl"      : sl,
+            "Sr"      : sr,
+            "modo_sol": bool(flags & 0x01),
+            "seq"     : seq,
+            "proto"   : "v2",
         }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -283,14 +334,14 @@ class DataPanel(QWidget):
         self.cards = {
             "vd"      : ValueCard("Vel. referencia", "m/s",   C["green"],  (-1.5, 1.5)),
             "v"       : ValueCard("Vel. real",       "m/s",   C["cyan"],   (-1.5, 1.5)),
-            "alpha"   : ValueCard("Inclinacion a",   "rad",   C["pink"],   (-1.0, 1.0)),
+            "alpha"   : ValueCard("Inclinacion a",   "rad",   C["pink"],   (-1.5, 1.5)),
             "theta"   : ValueCard("Orientacion th",  "rad",   C["purple"], (-1.0, 1.0)),
-            "oml"     : ValueCard("w izquierdo",     "rad/s", C["orange"], (-20.0,20.0)),
-            "omr"     : ValueCard("w derecho",       "rad/s", C["yellow"], (-20.0,20.0)),
+            "oml"     : ValueCard("w izquierdo",     "rad/s", C["orange"], (-45.0,45.0)),
+            "omr"     : ValueCard("w derecho",       "rad/s", C["yellow"], (-45.0,45.0)),
             "ul"      : ValueCard("Motor izq",       "V",     C["blue"],   (-12.0,12.0)),
             "ur"      : ValueCard("Motor der",       "V",     C["indigo"], (-12.0,12.0)),
-            "Sl"      : ValueCard("Sensor izq",      "",      C["teal"],   (0, 255)),
-            "Sr"      : ValueCard("Sensor der",      "",      C["mint"],   (0, 255)),
+            "Sl"      : ValueCard("Sensor izq",      "",      C["teal"],   (0, 4095)),
+            "Sr"      : ValueCard("Sensor der",      "",      C["mint"],   (0, 4095)),
             "modo_sol": ValueCard("Condicion solar", "",      C["sun"]),
         }
 
@@ -365,19 +416,19 @@ class PlotPanel(QWidget):
              "m/s", (-1.5, 1.5)),
             ("Inclinacion alpha – balance",
              {"alpha":(b["alpha"],C["pink"])},
-             "rad", (-1.0, 1.0)),
+             "rad", (-1.5, 1.5)),
             ("Orientacion theta – seguimiento linea",
              {"theta":(b["theta"],C["purple"])},
              "rad", (-1.0, 1.0)),
             ("Velocidades angulares ruedas",
              {"wL":(b["oml"],C["orange"]), "wR":(b["omr"],C["yellow"])},
-             "rad/s", (-20, 20)),
+             "rad/s", (-45, 45)),
             ("Voltajes motor",
              {"uL":(b["ul"],C["blue"]), "uR":(b["ur"],C["indigo"])},
              "V", (-12, 12)),
             ("Sensores de linea TCRT5000",
              {"Izq":(b["Sl"],C["teal"]), "Der":(b["Sr"],C["mint"])},
-             "ADC 0-255", (0, 255)),
+             "ADC 0-4095", (0, 4095)),
         ]
         self._charts = []
         for title, channels, ylabel, yrange in defs:
@@ -477,7 +528,7 @@ class MainWindow(QMainWindow):
         "# Cargar en MATLAB: data = readmatrix('archivo.txt', 'CommentStyle','#');\n"
         "# Columnas:\n"
         "# t[s]\tvd[m/s]\tv[m/s]\ttheta[rad]\talpha[rad]"
-        "\toml[rad/s]\tomr[rad/s]\tul[V]\tur[V]\tSl\tSr\tmodo_sol\n"
+        "\toml[rad/s]\tomr[rad/s]\tul[V]\tur[V]\tSl_adc12\tSr_adc12\tmodo_sol\n"
     )
 
     def __init__(self):
@@ -720,7 +771,7 @@ class MainWindow(QMainWindow):
             f.write("#   data = readmatrix('archivo.txt', 'CommentStyle','#');\n")
             f.write("# Columnas:\n")
             f.write("# t[s]\tvd[m/s]\tv[m/s]\ttheta[rad]\talpha[rad]"
-                    "\toml[rad/s]\tomr[rad/s]\tul[V]\tur[V]\tSl\tSr\tmodo_sol\n")
+                    "\toml[rad/s]\tomr[rad/s]\tul[V]\tur[V]\tSl_adc12\tSr_adc12\tmodo_sol\n")
             with self._rec_lock:
                 self._rec_file = f
                 self._rec_t    = 0.0
@@ -782,8 +833,12 @@ class MainWindow(QMainWindow):
                 f" background:{C['bg3']}; border-radius:10px; padding:2px 10px;")
 
         n = len(next(iter(self._bufs.values())))
+        proto = self._latest.get("proto", "?")
+        seq = self._latest.get("seq")
+        seq_txt = "" if seq is None else f"   |   seq: {seq}"
         self._botbar.setText(
             f"  ESP32: {self._esp32_ip}   |   "
+            f"Proto: {proto}{seq_txt}   |   "
             f"Total paquetes: {self._pkt_count}   |   "
             f"Buf: {n}/{BUF_LEN} muestras")
 

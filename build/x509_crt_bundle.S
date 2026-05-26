@@ -1,4 +1,4 @@
-/* * Data converted from C:/Users/luis_/Documents/PISDRRSLCODE/build/esp-idf/mbedtls/x509_crt_bundle
+/* * Data converted from C:/Users/DMC2503/Documents/Personal/PROYECTOFINALCONTROLIII/build/esp-idf/mbedtls/x509_crt_bundle
  */
 .data
 #if !defined (__APPLE__) && !defined (__linux__)

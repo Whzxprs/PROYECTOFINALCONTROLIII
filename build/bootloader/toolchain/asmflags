@@ -1,4 +1,4 @@
-"-specs=C:/Users/luis_/Documents/PISDRRSLCODE/build/bootloader/specs/picolibc.specs"
+"-specs=C:/Users/DMC2503/Documents/Personal/PROYECTOFINALCONTROLIII/build/bootloader/specs/picolibc.specs"
 -Wno-frame-address
 -mlongcalls
 -fno-builtin-memcpy

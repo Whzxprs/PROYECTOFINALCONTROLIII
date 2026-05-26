@@ -18,8 +18,8 @@ end
 
 # Load bootloader symbols
 set confirm off
-    add-symbol-file C:/Users/luis_/Documents/PISDRRSLCODE/build/bootloader/bootloader.elf
+    add-symbol-file C:/Users/DMC2503/Documents/Personal/PROYECTOFINALCONTROLIII/build/bootloader/bootloader.elf
 set confirm on
 
 # Load application symbols
-file C:/Users/luis_/Documents/PISDRRSLCODE/build/pisdrsl.elf
+file C:/Users/DMC2503/Documents/Personal/PROYECTOFINALCONTROLIII/build/pisdrsl.elf

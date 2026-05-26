@@ -3,4 +3,4 @@
 -fno-builtin-memcpy
 -fno-builtin-memset
 -fno-builtin-bzero
-"-specs=C:/Users/luis_/Documents/PISDRRSLCODE/build/specs/picolibc.specs"
+"-specs=C:/Users/DMC2503/Documents/Personal/PROYECTOFINALCONTROLIII/build/specs/picolibc.specs"

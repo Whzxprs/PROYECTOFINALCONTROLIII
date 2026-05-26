@@ -6,15 +6,15 @@
  * FUENTES:
  *   Control  → embebidoRVCSclas.c (PIC18F4550)  — variables físicas, filtro, ganancias
  *   Pines    → main_pic_clean.c                  — verificados en el hardware real
- *   Telemetría → main_pic_clean.c                — UDP binario 0xAA + 11 bytes
+ *   Telemetría → UDP binario v2 0xAB + float32 + ADC crudo 12-bit
  *
  * ARQUITECTURA FreeRTOS:
  *   Core 1 — control_task  (prioridad máxima, 100 Hz via esp_timer)
  *   Core 0 — cmd_task      (recibe ganancias por UDP en tiempo real, puerto 5006)
- *   Timer  — esp_timer     (10 000 µs → xTaskNotifyGive → control_task)
+ *   Timer  — esp_timer ISR (10 000 µs → vTaskNotifyGiveFromISR → control_task)
  *
  * TELEMETRÍA (cada ciclo de 10 ms):
- *   Paquete binario: 0xAA + 11 bytes → UDP broadcast 255.255.255.255:5005
+ *   Paquete binario v2: 0xAB + float32 + ADC12 → UDP broadcast 255.255.255.255:5005
  *   Abrir monitor: python monitor/monitor.py
  *
  * AJUSTE EN VIVO (sin recompilar):
@@ -49,8 +49,8 @@ static const char *TAG = "PISDRSL";
 #define PIN_SCL         GPIO_NUM_22
 
 /* Sensores de línea TCRT5000 (ADC1) */
-#define ADC_CH_IZQ      ADC_CHANNEL_7   /* GPIO35 */
-#define ADC_CH_DER      ADC_CHANNEL_6   /* GPIO34 */
+#define ADC_CH_IZQ      ADC_CHANNEL_6   /* GPIO34 */
+#define ADC_CH_DER      ADC_CHANNEL_7   /* GPIO35 */
 
 /* Encoders de cuadratura — ISR en flanco cualquiera */
 #define PIN_ENC_RA      GPIO_NUM_18
@@ -92,10 +92,15 @@ static const char *TAG = "PISDRSL";
 
 /* IMU y ángulo */
 #define CALPHA      0.145f           /* Compensación de alineación del MPU [rad] */
-#define C1          0.95f           /* Constante filtro complementario */
+#define C1          0.70f          /* Constante filtro complementario ajustable */
 #define C2          (1.0f - C1)
 #define ACCEL_F     0.0000610352f   /* Escala acelerómetro (LSB→rango ±1) */
-#define GYRO_F      0.0076336f       /* Escala giroscopio (LSB→°/s) — ±2000°/s: 2000/32768 */
+#define GYRO_F      0.0076336f       /* Escala giroscopio (LSB→°/s) — ±250°/s: 1/131 */
+
+/* Sensores de línea: usar ADC12 nativo, no escala heredada de 8 bits */
+#define ADC12_MAX        4095.0f
+#define LINE_THETA_MAX   0.3f
+#define LINE_ERR_MAX_ADC (160.0f * ADC12_MAX / 255.0f)
 
 /* Límites */
 #define TAU_MAX     0.1654f            /* Par máximo en rueda [Nm] */
@@ -108,7 +113,9 @@ static const char *TAG = "PISDRSL";
 #define ESC_ENC     (PI_ / (2.0f * PPR * NR))  /* rad por pulso encoder */
 #define RASNKM      (RA_MOT / (KM_MOT * NR))   /* Ra/(km·NR) para back-EMF */
 #define NKM         (KM_MOT * NR)              /* km·NR para back-EMF */
-#define ESC_PWM     (255.0f / U_M)             /* Escala voltaje→duty 8-bit */
+#define PWM_RES_BITS     13U
+#define PWM_DUTY_MAX     ((1U << PWM_RES_BITS) - 1U)
+#define ESC_PWM          ((float)PWM_DUTY_MAX / U_M)  /* Escala voltaje→duty */
 #define V2TAUM      (2.0f * TAU_MAX)           /* Límite de saturación de u */
 
 /* ============================================================================
@@ -129,22 +136,39 @@ volatile float g_ramp  = 0.0f;    /* Rampa de velocidad [m/s por ciclo de 10ms] 
 volatile float g_alphad = 0.0f;   /* Referencia de inclinación [rad] — ajustar para calibrar balance */
 
 /* ============================================================================
-   SECCIÓN 4 — TELEMETRÍA (del main_pic_clean, protocolo binario)
-   Paquete: 0xAA + 11 bytes → UDP broadcast 255.255.255.255:5005
+   SECCIÓN 4 — TELEMETRÍA
+   Paquete v2: 0xAB + version + seq + 8 float32 + 2 ADC12 + flags.
    Monitor: python monitor/monitor.py → "Escuchar"
    ============================================================================ */
-#define KT_V    637.5f    /* Escala velocidad traslacional */
-#define KT_TH   426.6f   /* Escala orientación */
-#define KT_AL   91.07f   /* Escala inclinación */
-#define KT_OM   8.67f    /* Escala velocidad angular */
-#define KT_U    12.08f   /* Escala voltaje motor */
+#define TELEM_HEADER    0xABu
+#define TELEM_VERSION   2u
+#define TELEM_FLAG_SOL  0x01u
+
+typedef struct __attribute__((packed)) {
+    uint8_t  header;
+    uint8_t  version;
+    uint16_t seq;
+    float    vd;
+    float    v;
+    float    theta;
+    float    alpha;
+    float    omegal;
+    float    omegar;
+    float    ul;
+    float    ur;
+    uint16_t sl_adc;
+    uint16_t sr_adc;
+    uint8_t  flags;
+} telemetry_pkt_t;
+
+_Static_assert(sizeof(telemetry_pkt_t) == 41, "telemetry_pkt_t debe medir 41 bytes");
 
 /* ============================================================================
    SECCIÓN 5 — CONFIGURACIÓN WIFI Y UDP
    ============================================================================ */
-#define WIFI_SSID        "WHZ_QW"
+#define WIFI_SSID        "WifiAlex"
 #define WIFI_PASS        "Acetilena1702@@//"
-#define UDP_DEST_IP      "192.168.1.79"  /* Broadcast: no necesita IP de la PC */
+#define UDP_DEST_IP      "192.168.43.101"  /* Broadcast: no necesita IP de la PC */
 #define UDP_PORT         5005               /* Puerto que escucha monitor.py */
 #define CMD_UDP_PORT     5006               /* Puerto para recibir ganancias desde PC */
 #define WIFI_TIMEOUT_MS  15000 
@@ -160,7 +184,7 @@ volatile float g_alphad = 0.0f;   /* Referencia de inclinación [rad] — ajusta
 #define LEDC_CH_L       LEDC_CHANNEL_0
 #define LEDC_CH_R       LEDC_CHANNEL_1
 #define LEDC_FREQ_HZ    5000
-#define LEDC_RES        LEDC_TIMER_8_BIT  /* 8-bit: 0–255, igual que el PIC */
+#define LEDC_RES        LEDC_TIMER_13_BIT  /* 13-bit: 0–8191 a 5 kHz */
 
 /* Registros MPU6050 */
 #define MPU_ADDR        0x68
@@ -168,7 +192,8 @@ volatile float g_alphad = 0.0f;   /* Referencia de inclinación [rad] — ajusta
 #define REG_CONFIG_R    0x1A
 #define REG_GYRO_CFG    0x1B
 #define REG_ACCEL_XH    0x3B    /* Acelerómetro X (High byte) */
-#define REG_GYRO_YH     0x45    /* Giroscopio Y (High byte) */
+#define MPU_FRAME_LEN   14      /* ACCEL(6) + TEMP(2) + GYRO(6) desde 0x3B */
+#define MPU_GYRO_Y_IDX  10      /* Índice de GYRO_YH dentro del frame */
 
 /* ============================================================================
    SECCIÓN 7 — VARIABLES GLOBALES
@@ -232,7 +257,11 @@ static void IRAM_ATTR enc_isr(void *arg)
    ============================================================================ */
 static void timer_cb(void *arg)
 {
-    vTaskNotifyGiveFromISR(ctrl_task_handle, NULL);
+    BaseType_t hp_task_woken = pdFALSE;
+    vTaskNotifyGiveFromISR(ctrl_task_handle, &hp_task_woken);
+    if (hp_task_woken == pdTRUE) {
+        esp_timer_isr_dispatch_need_yield();
+    }
 }
 
 /* ============================================================================
@@ -250,13 +279,13 @@ static void mpu_read_regs(uint8_t reg, uint8_t *out, size_t n)
 }
 
 /* ============================================================================
-   SECCIÓN 11 — ACTUADORES: motor con PWM 8-bit y dirección por H-bridge
+   SECCIÓN 11 — ACTUADORES: motor con PWM de alta resolución y H-bridge
    ============================================================================ */
 static void motor_set(gpio_num_t in1, gpio_num_t in2,
                       ledc_channel_t ch, float u)
 {
     uint32_t duty = (uint32_t)(ESC_PWM * fabsf(u));
-    if (duty > 255U) duty = 255U;
+    if (duty > PWM_DUTY_MAX) duty = PWM_DUTY_MAX;
 
     /* Dirección según signo de u */
     gpio_set_level(in1, (u < 0.0f) ? 1 : 0);
@@ -296,7 +325,7 @@ static void hw_init(void)
     };
     ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c_bus, &mpu_cfg, &mpu_dev));
 
-    /* ── LEDC PWM 8-bit ───────────────────────────────────────────────────── */
+    /* ── LEDC PWM de alta resolución ──────────────────────────────────────── */
     ledc_timer_config_t lt = {
         .speed_mode      = LEDC_MODE_N,
         .timer_num       = LEDC_TIMER_N,
@@ -376,7 +405,7 @@ static void mpu_init(void)
     vTaskDelay(pdMS_TO_TICKS(100));
     mpu_write(REG_CONFIG_R, 0x01);       /* DLPF 188 Hz */
     vTaskDelay(pdMS_TO_TICKS(10));
-    mpu_write(REG_GYRO_CFG, 0x18);       /* Giroscopio ±2000°/s — evita saturación en cualquier movimiento */
+    mpu_write(REG_GYRO_CFG, 0x00);       /* Giroscopio ±250°/s — coincide con GYRO_F y el PIC */
     vTaskDelay(pdMS_TO_TICKS(10));
     ESP_LOGI(TAG, "MPU6050 OK");
 }
@@ -489,6 +518,44 @@ static void cmd_task(void *arg)
     vTaskDelete(NULL);
 }
 
+static uint16_t clamp_adc12(int raw)
+{
+    if (raw < 0) return 0u;
+    if (raw > 4095) return 4095u;
+    return (uint16_t)raw;
+}
+
+static void telemetry_send(uint16_t seq,
+                           float vd, float v,
+                           float theta, float alpha,
+                           float omegal, float omegar,
+                           float ul, float ur,
+                           int raw_izq, int raw_der,
+                           uint8_t flags)
+{
+    int s = udp_sock;
+    if (s < 0) return;
+
+    const telemetry_pkt_t pkt = {
+        .header = TELEM_HEADER,
+        .version = TELEM_VERSION,
+        .seq = seq,
+        .vd = vd,
+        .v = v,
+        .theta = theta,
+        .alpha = alpha,
+        .omegal = omegal,
+        .omegar = omegar,
+        .ul = ul,
+        .ur = ur,
+        .sl_adc = clamp_adc12(raw_izq),
+        .sr_adc = clamp_adc12(raw_der),
+        .flags = flags,
+    };
+    sendto(s, &pkt, sizeof(pkt), 0,
+           (struct sockaddr *)&udp_dest, sizeof(udp_dest));
+}
+
 /* ============================================================================
    SECCIÓN 15 — TAREA DE CONTROL (Core 1, prioridad máxima, 100 Hz)
 
@@ -516,8 +583,9 @@ static void control_task(void *arg)
     float intev = 0.0f;
     float vd_r  = 0.0f;   /* Velocidad deseada con rampa */
 
-    uint8_t raw[2];
+    uint8_t imu_raw[MPU_FRAME_LEN];
     uint32_t log_cnt = 0;
+    uint16_t telem_seq = 0;
 
     /* Esperar convergencia del filtro antes de activar control */
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -533,15 +601,14 @@ static void control_task(void *arg)
         int raw_izq = 0, raw_der = 0;
         adc_oneshot_read(adc1_handle, ADC_CH_IZQ, &raw_izq);
         adc_oneshot_read(adc1_handle, ADC_CH_DER, &raw_der);
-        float Sl = raw_izq * (255.0f / 4095.0f);   /* Escalar 12-bit → 0–255 */
-        float Sr = raw_der * (255.0f / 4095.0f);
+        float Sl = (float)raw_izq;   /* ADC12 crudo: 0–4095 */
+        float Sr = (float)raw_der;
 
-        /* ── PASO 2: IMU — Acelerómetro Ax y Giroscopio Gy ─────────────── */
-        mpu_read_regs(REG_ACCEL_XH, raw, 2);
-        int16_t Ax = (int16_t)((raw[0] << 8) | raw[1]);
-
-        mpu_read_regs(REG_GYRO_YH, raw, 2);
-        int16_t Gy = (int16_t)((raw[0] << 8) | raw[1]);
+        /* ── PASO 2: IMU — lectura burst ACCEL+GYRO para menor jitter ───── */
+        mpu_read_regs(REG_ACCEL_XH, imu_raw, MPU_FRAME_LEN);
+        int16_t Ax = (int16_t)((imu_raw[0] << 8) | imu_raw[1]);
+        int16_t Gy = (int16_t)((imu_raw[MPU_GYRO_Y_IDX] << 8) |
+                               imu_raw[MPU_GYRO_Y_IDX + 1]);
 
         /* ── PASO 3: Encoders — delta de cuentas en 10 ms ───────────────── */
         portENTER_CRITICAL(&enc_mux);
@@ -549,11 +616,11 @@ static void control_task(void *arg)
         int32_t cnt_l = enc_l; enc_l = 0;
         portEXIT_CRITICAL(&enc_mux);
 
-        /* ── PASO 4: Error de seguimiento de línea (PIC: theta = Sr-Sl...) */
+        /* ── PASO 4: Error de seguimiento de línea en escala ADC12 ─────── */
         float theta = Sr - Sl;
-        if (theta >  160.0f) theta =  160.0f;
-        if (theta < -160.0f) theta = -160.0f;
-        theta = -0.3f * theta / 160.0f;
+        if (theta >  LINE_ERR_MAX_ADC) theta =  LINE_ERR_MAX_ADC;
+        if (theta < -LINE_ERR_MAX_ADC) theta = -LINE_ERR_MAX_ADC;
+        theta = -LINE_THETA_MAX * theta / LINE_ERR_MAX_ADC;
 
         /* ── PASO 5: Velocidades angulares de rueda ──────────────────────
          * Cruce físico verificado: enc_l (LA/LB) → rueda derecha
@@ -590,22 +657,9 @@ static void control_task(void *arg)
             ei_1  = 0.0f;
             intev = 0.0f;
             vd_r  = 0.0f;
-            /* Telemetría en estado caído: motores y velocidades a cero */
-            {
-                uint8_t sl_b = (Sl > 255.0f) ? 255u : (uint8_t)Sl;
-                uint8_t sr_b = (Sr > 255.0f) ? 255u : (uint8_t)Sr;
-                uint8_t fp[12] = {
-                    0xAAu,
-                    127u, 127u,
-                    (uint8_t)(KT_TH * theta + 128.0f),
-                    (uint8_t)(KT_AL * alpha + 127.0f),
-                    127u, 127u, 127u, 127u,
-                    sl_b, sr_b, 0x00u,
-                };
-                int fs = udp_sock;
-                if (fs >= 0) sendto(fs, fp, sizeof(fp), 0,
-                                    (struct sockaddr *)&udp_dest, sizeof(udp_dest));
-            }
+            telemetry_send(telem_seq++, 0.0f, 0.0f, theta, alpha,
+                           0.0f, 0.0f, 0.0f, 0.0f,
+                           raw_izq, raw_der, 0x00u);
             gpio_set_level(PIN_DEBUG, 0);
             continue;
         }
@@ -670,29 +724,10 @@ static void control_task(void *arg)
         motor_set(PIN_MOT_L_IN1, PIN_MOT_L_IN2, LEDC_CH_L, -ul);
         motor_set(PIN_MOT_R_IN1, PIN_MOT_R_IN2, LEDC_CH_R,  ur);
 
-        /* ── PASO 14: Telemetría UDP binaria ─────────────────────────────
-         * Formato: 0xAA + 11 bytes (mismo que main_pic_clean y monitor)
-         * Envío cada ciclo (10 ms → 100 Hz de datos al monitor)          */
-        uint8_t sl_b = (Sl > 255.0f) ? 255u : (uint8_t)Sl;
-        uint8_t sr_b = (Sr > 255.0f) ? 255u : (uint8_t)Sr;
-        uint8_t pkt[12] = {
-            0xAAu,
-            (uint8_t)(KT_V  * vd_r   + 127.0f),
-            (uint8_t)(KT_V  * v      + 127.0f),
-            (uint8_t)(KT_TH * theta  + 128.0f),
-            (uint8_t)(KT_AL * alpha  + 127.0f),
-            (uint8_t)(KT_OM * omegal + 127.0f),
-            (uint8_t)(KT_OM * omegar + 127.0f),
-            (uint8_t)(KT_U  * ul     + 127.0f),
-            (uint8_t)(KT_U  * ur     + 127.0f),
-            sl_b, sr_b,
-            0x00u,
-        };
-        int s = udp_sock;
-        if (s >= 0) {
-            sendto(s, pkt, sizeof(pkt), 0,
-                   (struct sockaddr *)&udp_dest, sizeof(udp_dest));
-        }
+        /* ── PASO 14: Telemetría UDP v2, float32 + ADC crudo 12-bit ───── */
+        telemetry_send(telem_seq++, vd_r, v, theta, alpha,
+                       omegal, omegar, ul, ur,
+                       raw_izq, raw_der, 0x00u);
 
         /* ── Log serial cada 500 ms (50 ciclos) ──────────────────────── */
         if (++log_cnt >= 50) {
@@ -722,9 +757,13 @@ void app_main(void)
     xTaskCreatePinnedToCore(control_task, "ctrl", 4096, NULL,
                             configMAX_PRIORITIES - 1, &ctrl_task_handle, 1);
 
-    /* Timer a 100 Hz (10 000 µs) — usa xTaskNotifyGive, no requiere Kconfig extra */
+    /* Timer a 100 Hz (10 000 µs) — dispatch desde ISR para menor jitter */
     esp_timer_handle_t tmr;
-    const esp_timer_create_args_t ta = { .callback = timer_cb, .name = "ctrl_tmr" };
+    const esp_timer_create_args_t ta = {
+        .callback = timer_cb,
+        .dispatch_method = ESP_TIMER_ISR,
+        .name = "ctrl_tmr",
+    };
     ESP_ERROR_CHECK(esp_timer_create(&ta, &tmr));
     ESP_ERROR_CHECK(esp_timer_start_periodic(tmr, 10000));
 
