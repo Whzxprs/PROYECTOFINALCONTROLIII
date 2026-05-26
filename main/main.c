@@ -84,25 +84,25 @@ static const char *TAG = "PISDRSL";
 
 /* Motor y transmisión */
 #define PPR         12.0f           /* Pulsos por revolución del encoder */
-#define NR          44.0f           /* Relación de transmisión */
-#define R_W         0.034f          /* Radio de rueda [m] */
+#define NR          34.014f           /* Relación de transmisión */
+#define R_W         0.035f          /* Radio de rueda [m] */
 #define RA_MOT      3.0f            /* Resistencia del motor [Ohm] */
 #define KM_MOT      0.0008f         /* Constante de par [Nm/A] */
-#define B_H         0.0965f         /* Semidistancia entre ruedas [m] */
+#define B_H         0.09f         /* Semidistancia entre ruedas [m] */
 
 /* IMU y ángulo */
 #define CALPHA      0.145f           /* Compensación de alineación del MPU [rad] */
-#define C1          0.65f           /* Constante filtro complementario */
+#define C1          0.95f           /* Constante filtro complementario */
 #define C2          (1.0f - C1)
 #define ACCEL_F     0.0000610352f   /* Escala acelerómetro (LSB→rango ±1) */
-#define GYRO_F      0.061035f       /* Escala giroscopio (LSB→°/s) — ±2000°/s: 2000/32768 */
+#define GYRO_F      0.0076336f       /* Escala giroscopio (LSB→°/s) — ±2000°/s: 2000/32768 */
 
 /* Límites */
-#define TAU_MAX     0.3f            /* Par máximo en rueda [Nm] */
+#define TAU_MAX     0.1654f            /* Par máximo en rueda [Nm] */
 #define ALPHA_MAX   1.4f            /* Ángulo máximo antes de declarar caída [rad] */
-#define OMEGA_MAX   16.0f           /* Velocidad angular máxima de rueda [rad/s] */
-#define U_M         10.55f          /* Voltaje máximo para escala PWM [V] */
-#define U_NM        10.0f           /* Voltaje máximo a los motores [V] */
+#define OMEGA_MAX   44.0f           /* Velocidad angular máxima de rueda [rad/s] */
+#define U_M         11.0f          /* Voltaje máximo para escala PWM [V] */
+#define U_NM        11.0f           /* Voltaje máximo a los motores [V] */
 
 /* Constantes derivadas (mismas fórmulas que PIC) */
 #define ESC_ENC     (PI_ / (2.0f * PPR * NR))  /* rad por pulso encoder */

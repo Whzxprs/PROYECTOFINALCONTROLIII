@@ -1,7 +1,7 @@
 {
     "version":            "1.3",
     "project_name":       "pisdrsl",
-    "project_version":    "df2885e-dirty",
+    "project_version":    "836f74b-dirty",
     "project_path":       "C:/Users/luis_/Documents/PISDRRSLCODE",
     "idf_path":           "C:/esp/v6.0.1/esp-idf",
     "build_dir":          "C:/Users/luis_/Documents/PISDRRSLCODE/build",
