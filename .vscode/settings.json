@@ -1,0 +1,38 @@
+{
+    // ─────────────────────────────────────────────────────────────────────
+    // CÓMO ARREGLAR LOS ERRORES "cannot open source file" EN VSCODE
+    // ─────────────────────────────────────────────────────────────────────
+    //
+    // Los errores rojos en el editor son de IntelliSense (análisis estático
+    // de VSCode), NO son errores de compilación real.
+    // El código compila correctamente con: idf.py build
+    //
+    // Para que el editor encuentre los headers del ESP-IDF:
+    //
+    //   PASO 1 — Ejecutar UNA SOLA VEZ en la terminal:
+    //     idf.py set-target esp32
+    //     idf.py build
+    //
+    //   Esto genera el archivo:
+    //     build/compile_commands.json
+    //
+    //   Ese archivo contiene TODAS las rutas de includes del IDF.
+    //   La siguiente línea le dice a VSCode que lo use:
+    // ─────────────────────────────────────────────────────────────────────
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+
+    // Deshabilitar el proveedor de IntelliSense predeterminado de C/C++
+    // y usar el de compilación (más preciso para proyectos CMake/IDF)
+    "C_Cpp.intelliSenseEngine": "default",
+
+    // Asociar archivos .c del proyecto al modo C (no C++)
+    "files.associations": {
+        "*.c": "c",
+        "*.h": "c"
+    },
+
+    // Mostrar errores y advertencias del compilador real (no IntelliSense)
+    // en el panel de Problemas cuando se ejecuta idf.py build desde la extensión
+    "idf.enableUpdateSrcsToCMakeLists": false,
+    "idf.currentSetup": "C:\\esp\\v6.0.1\\esp-idf"
+}

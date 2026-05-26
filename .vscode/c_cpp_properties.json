@@ -1,0 +1,75 @@
+{
+    "configurations": [
+        {
+            "name": "ESP32 IDF",
+
+            // compile_commands.json (generado por 'idf.py build') es la fuente
+            // más completa y precisa. Una vez que compiles por primera vez,
+            // IntelliSense usará esto y todos los errores desaparecerán.
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+
+            // Rutas de includes directas — permiten que IntelliSense funcione
+            // ANTES de compilar por primera vez.
+            // Verificadas contra la instalación real: C:\esp\v6.0.1\esp-idf
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/build/config",
+
+                // FreeRTOS (IDF v6 — rutas verificadas)
+                "C:/esp/v6.0.1/esp-idf/components/freertos/FreeRTOS-Kernel/include",
+                "C:/esp/v6.0.1/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/include",
+                "C:/esp/v6.0.1/esp-idf/components/freertos/esp_additions/include",
+                "C:/esp/v6.0.1/esp-idf/components/freertos/config/xtensa/include",
+
+                // ESP-IDF core
+                "C:/esp/v6.0.1/esp-idf/components/esp_common/include",
+                "C:/esp/v6.0.1/esp-idf/components/esp_hw_support/include",
+                "C:/esp/v6.0.1/esp-idf/components/esp_system/include",
+                "C:/esp/v6.0.1/esp-idf/components/esp_rom/include",
+                "C:/esp/v6.0.1/esp-idf/components/hal/include",
+                "C:/esp/v6.0.1/esp-idf/components/soc/esp32/include",
+                "C:/esp/v6.0.1/esp-idf/components/soc/include",
+                "C:/esp/v6.0.1/esp-idf/components/log/include",
+
+                // Drivers de hardware (IDF v6: componentes separados, rutas verificadas)
+                "C:/esp/v6.0.1/esp-idf/components/esp_driver_i2c/include",
+                "C:/esp/v6.0.1/esp-idf/components/esp_driver_ledc/include",
+                "C:/esp/v6.0.1/esp-idf/components/esp_driver_gpio/include",
+                "C:/esp/v6.0.1/esp-idf/components/esp_driver_pcnt/include",
+                "C:/esp/v6.0.1/esp-idf/components/esp_adc/include",
+                "C:/esp/v6.0.1/esp-idf/components/esp_timer/include",
+
+                // WiFi y red
+                "C:/esp/v6.0.1/esp-idf/components/esp_wifi/include",
+                "C:/esp/v6.0.1/esp-idf/components/esp_netif/include",
+                "C:/esp/v6.0.1/esp-idf/components/esp_event/include",
+                "C:/esp/v6.0.1/esp-idf/components/nvs_flash/include",
+
+                // lwIP (stack TCP/IP — sockets UDP)
+                "C:/esp/v6.0.1/esp-idf/components/lwip/lwip/src/include",
+                "C:/esp/v6.0.1/esp-idf/components/lwip/port/include",
+                "C:/esp/v6.0.1/esp-idf/components/lwip/port/esp32xx/include",
+
+                // Otras
+                "C:/esp/v6.0.1/esp-idf/components/heap/include",
+                "C:/esp/v6.0.1/esp-idf/components/esp_libc/platform_include"
+            ],
+
+            // Macros predefinidas para el ESP32
+            "defines": [
+                "ESP_PLATFORM",
+                "IDF_VER=\"v6.0.1\"",
+                "CONFIG_IDF_TARGET_ESP32=1",
+                "__xtensa__"
+            ],
+
+            // Compilador cross del ESP32 (Xtensa) — ruta verificada en este sistema
+            "compilerPath": "C:/Espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32-elf-gcc.exe",
+
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "gcc-x86"
+        }
+    ],
+    "version": 4
+}
