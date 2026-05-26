@@ -91,11 +91,11 @@ static const char *TAG = "PISDRSL";
 #define B_H         0.0965f         /* Semidistancia entre ruedas [m] */
 
 /* IMU y ángulo */
-#define CALPHA      0.21f           /* Compensación de alineación del MPU [rad] */
-#define C1          0.995f          /* Constante filtro complementario */
+#define CALPHA      0.145f           /* Compensación de alineación del MPU [rad] */
+#define C1          0.65f           /* Constante filtro complementario */
 #define C2          (1.0f - C1)
 #define ACCEL_F     0.0000610352f   /* Escala acelerómetro (LSB→rango ±1) */
-#define GYRO_F      0.0076336f      /* Escala giroscopio (LSB→°/s) */
+#define GYRO_F      0.061035f       /* Escala giroscopio (LSB→°/s) — ±2000°/s: 2000/32768 */
 
 /* Límites */
 #define TAU_MAX     0.3f            /* Par máximo en rueda [Nm] */
@@ -147,13 +147,13 @@ volatile float g_alphad = 0.0f;   /* Referencia de inclinación [rad] — ajusta
 #define UDP_DEST_IP      "192.168.1.79"  /* Broadcast: no necesita IP de la PC */
 #define UDP_PORT         5005               /* Puerto que escucha monitor.py */
 #define CMD_UDP_PORT     5006               /* Puerto para recibir ganancias desde PC */
-#define WIFI_TIMEOUT_MS  15000
+#define WIFI_TIMEOUT_MS  15000 
 
 /* ============================================================================
    SECCIÓN 6 — CONFIGURACIÓN DE PERIFÉRICOS
    ============================================================================ */
 #define I2C_PORT        I2C_NUM_0
-#define I2C_FREQ_HZ     100000          /* 100 kHz: más robusto con cables reales */
+#define I2C_FREQ_HZ     400000          /* 400 kHz: lectura MPU más rápida */
 
 #define LEDC_TIMER_N    LEDC_TIMER_0
 #define LEDC_MODE_N     LEDC_LOW_SPEED_MODE
@@ -376,7 +376,7 @@ static void mpu_init(void)
     vTaskDelay(pdMS_TO_TICKS(100));
     mpu_write(REG_CONFIG_R, 0x01);       /* DLPF 188 Hz */
     vTaskDelay(pdMS_TO_TICKS(10));
-    mpu_write(REG_GYRO_CFG, 0x00);       /* Giroscopio ±250°/s */
+    mpu_write(REG_GYRO_CFG, 0x18);       /* Giroscopio ±2000°/s — evita saturación en cualquier movimiento */
     vTaskDelay(pdMS_TO_TICKS(10));
     ESP_LOGI(TAG, "MPU6050 OK");
 }
@@ -590,6 +590,22 @@ static void control_task(void *arg)
             ei_1  = 0.0f;
             intev = 0.0f;
             vd_r  = 0.0f;
+            /* Telemetría en estado caído: motores y velocidades a cero */
+            {
+                uint8_t sl_b = (Sl > 255.0f) ? 255u : (uint8_t)Sl;
+                uint8_t sr_b = (Sr > 255.0f) ? 255u : (uint8_t)Sr;
+                uint8_t fp[12] = {
+                    0xAAu,
+                    127u, 127u,
+                    (uint8_t)(KT_TH * theta + 128.0f),
+                    (uint8_t)(KT_AL * alpha + 127.0f),
+                    127u, 127u, 127u, 127u,
+                    sl_b, sr_b, 0x00u,
+                };
+                int fs = udp_sock;
+                if (fs >= 0) sendto(fs, fp, sizeof(fp), 0,
+                                    (struct sockaddr *)&udp_dest, sizeof(udp_dest));
+            }
             gpio_set_level(PIN_DEBUG, 0);
             continue;
         }
@@ -605,7 +621,7 @@ static void control_task(void *arg)
 
         /* ── PASO 9: Errores y controladores (PIC) ───────────────────────
          * Rampa de velocidad para arranque suave (g_ramp=0 → escalón)    */
-        float ei  = alpha - g_alphad;
+        float ei  = g_alphad - alpha;
         float eip = (ei - ei_1) * ITS;
         ei_1 = ei;
 
